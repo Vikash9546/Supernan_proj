@@ -1,0 +1,17 @@
+# Environments
+venv/
+env/
+.env
+
+# Output and debug files
+dubbed_kannada_output.mp4
+DEBUG_aligned_audio.wav
+debug_audio.m4a
+test_audio.py
+
+# Python caches
+__pycache__/
+*.pyc
+
+# OS generated files
+.DS_Store
