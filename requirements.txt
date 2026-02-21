@@ -1,0 +1,38 @@
+# Core
+torch>=2.1.0
+torchvision>=0.16.0
+torchaudio>=2.1.0
+numpy>=1.26.0
+tqdm>=4.66.0
+
+# Transcription
+openai-whisper>=20231117
+
+# Translation
+transformers>=4.35.0
+sentencepiece>=0.1.99
+# Optional: bitsandbytes for 4-bit LLM quantization
+# bitsandbytes>=0.41.0
+
+# TTS
+TTS>=0.22.0
+
+# Audio processing
+librosa>=0.10.0
+pyrubberband>=0.3.0     # High-quality pitch-preserving time stretch
+webrtcvad>=2.0.10       # Silence-aware chunking
+
+# Video processing
+opencv-python>=4.8.0
+mediapipe>=0.10.0       # Lightweight face detection
+
+# FFmpeg bindings
+ffmpeg-python>=0.2.0
+
+# Face enhancement (CodeFormer)
+# Install via: pip install codeformer-pip basicsr
+# codeformer-pip>=0.1.0
+# basicsr>=1.4.0
+
+# Scipy for signal processing
+scipy>=1.11.0
