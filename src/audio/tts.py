@@ -67,22 +67,70 @@ class XTTSGenerator:
             out_path = os.path.join(workdir, f"tts_seg_{i:04d}.wav")
 
             try:
-                if speaker_wav and os.path.exists(speaker_wav):
-                    self._tts.tts_to_file(
-                        text=text,
-                        speaker_wav=speaker_wav,
-                        language="hi",
-                        file_path=out_path,
-                    )
-                else:
-                    self._tts.tts_to_file(
-                        text=text,
-                        language="hi",
-                        file_path=out_path,
-                    )
+                target_duration = seg["end"] - seg["start"]
+                
+                def _generate(speed=1.0):
+                    # XTTS has a hard 250 character limit per generation.
+                    # We split long texts into chunks of ~200 chars.
+                    words = text.split()
+                    chunks = []
+                    current_chunk = []
+                    current_len = 0
+                    for w in words:
+                        if current_len + len(w) + 1 > 200:
+                            chunks.append(" ".join(current_chunk))
+                            current_chunk = [w]
+                            current_len = len(w)
+                        else:
+                            current_chunk.append(w)
+                            current_len += len(w) + 1
+                    if current_chunk:
+                        chunks.append(" ".join(current_chunk))
 
-                # Get actual duration of synthesized audio
+                    import soundfile as sf
+                    all_audio = []
+                    sr = 22050
+                    
+                    for i, chunk in enumerate(chunks):
+                        temp_chunk = out_path.replace(".wav", f"_part{i}.wav")
+                        if speaker_wav and os.path.exists(speaker_wav):
+                            self._tts.tts_to_file(
+                                text=chunk,
+                                speaker_wav=speaker_wav,
+                                language="hi",
+                                file_path=temp_chunk,
+                                speed=speed
+                            )
+                        else:
+                            self._tts.tts_to_file(
+                                text=chunk,
+                                language="hi",
+                                file_path=temp_chunk,
+                                speed=speed
+                            )
+                        if os.path.exists(temp_chunk):
+                            audio_data, sr = sf.read(temp_chunk)
+                            all_audio.append(audio_data)
+                            os.remove(temp_chunk)
+                    
+                    if all_audio:
+                        import numpy as np
+                        combined = np.concatenate(all_audio)
+                        sf.write(out_path, combined, sr)
+                
+                # First pass: generate at normal speed
+                _generate(speed=1.0)
                 duration = self._get_duration(out_path)
+
+                # Second pass: adjust speed if duration mismatch is significant
+                tolerance = 0.1  # seconds
+                if abs(duration - target_duration) > tolerance:
+                    speed_ratio = duration / target_duration
+                    logger.debug(f"Adjusting speech rate for segment {i}: speed={speed_ratio:.2f}")
+                    # XTTS speed range is typically limited (e.g., 0.5 to 2.0)
+                    speed_ratio = max(0.5, min(2.0, speed_ratio))
+                    _generate(speed=speed_ratio)
+                    duration = self._get_duration(out_path)
 
                 segment_audios.append(SegmentAudio(
                     start=seg["start"],
@@ -93,7 +141,7 @@ class XTTSGenerator:
 
                 logger.debug(
                     f"Segment {i}: [{seg['start']:.2f}-{seg['end']:.2f}] "
-                    f"target={seg['end'] - seg['start']:.2f}s, "
+                    f"target={target_duration:.2f}s, "
                     f"synth={duration:.2f}s → {out_path}"
                 )
 

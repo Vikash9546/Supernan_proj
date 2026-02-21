@@ -16,6 +16,12 @@ import os
 import tempfile
 import time
 import logging
+import torch
+
+# Monkey patch torch.load for PyTorch 2.6 to fix XTTS WeightsUnpickler error
+_original_load = torch.load
+torch.load = lambda *a, **k: _original_load(*a, **{**k, 'weights_only': False})
+
 from tqdm import tqdm
 
 from src.utils.gpu_manager import StageContext
@@ -29,6 +35,7 @@ from src.audio.process_ref import VoiceReferenceProcessor
 from src.video.face_tracker import FaceTracker
 from src.video.lip_sync import LipSyncEngine
 from src.video.enhance import FaceEnhancer
+from src.video.sync_eval import SyncEvaluator
 from src.video.compose import VideoComposer
 
 
@@ -63,7 +70,7 @@ def extract_full_audio(video_path: str, workdir: str) -> str:
     """Extract full audio track from video as 16kHz mono WAV."""
     audio_path = os.path.join(workdir, "full_audio.wav")
     os.system(
-        f"ffmpeg -y -i {video_path} -vn -acodec pcm_s16le -ar 16000 -ac 1 {audio_path}"
+        f"ffmpeg -y -i \"{video_path}\" -vn -acodec pcm_s16le -ar 16000 -ac 1 \"{audio_path}\""
     )
     return audio_path
 
@@ -139,6 +146,9 @@ def run_stage_audio(args, hindi_segs: list, total_duration: float,
     aligner.align_segments(segment_audios, aligned_audio)
     logger.info(f"Alignment: {time.time()-t0:.1f}s")
 
+    import shutil
+    shutil.copy(aligned_audio, "/Users/gourav/Desktop/Supernan_proj/DEBUG_aligned_audio.wav")
+    
     return aligned_audio
 
 
@@ -177,6 +187,10 @@ def run_stage_video(args, aligned_audio: str, workdir: str) -> str:
             "enhancer",
             lambda: FaceEnhancer(device=args.device).load()
         )
+        sync_eval = ctx.load_model(
+            "sync_eval",
+            lambda: SyncEvaluator(device=args.device).load()
+        )
 
         # Open streaming reader and writer
         reader = FFmpegFrameReader(args.input)
@@ -190,6 +204,7 @@ def run_stage_video(args, aligned_audio: str, workdir: str) -> str:
 
         t0 = time.time()
         frame_count = 0
+        lse_scores = []
 
         for frame_idx, frame in reader:
             # 3a. Face detection with EMA smoothing
@@ -204,11 +219,13 @@ def run_stage_video(args, aligned_audio: str, workdir: str) -> str:
 
             # 3c. Process batch when full
             if len(batch_crops) >= BATCH_SIZE:
-                _process_and_write_batch(
+                score = _process_and_write_batch(
                     batch_crops, batch_matrices, batch_originals,
-                    lip_sync, enhancer, tracker, aligned_audio, fps,
+                    lip_sync, enhancer, sync_eval, tracker, aligned_audio, fps,
                     writer
                 )
+                if score > 0:
+                    lse_scores.append(score)
                 batch_crops = []
                 batch_matrices = []
                 batch_originals = []
@@ -219,25 +236,36 @@ def run_stage_video(args, aligned_audio: str, workdir: str) -> str:
 
         # Process remaining frames
         if batch_crops:
-            _process_and_write_batch(
+            score = _process_and_write_batch(
                 batch_crops, batch_matrices, batch_originals,
-                lip_sync, enhancer, tracker, aligned_audio, fps,
+                lip_sync, enhancer, sync_eval, tracker, aligned_audio, fps,
                 writer
             )
+            if score > 0:
+                lse_scores.append(score)
 
         reader.close()
         writer.close()
+        
+        avg_lse = sum(lse_scores) / len(lse_scores) if lse_scores else 0.0
         logger.info(f"Video pipeline: {frame_count} frames in {time.time()-t0:.1f}s")
+        logger.info(f"Final Lip-Sync Confidence (LSE-C): {avg_lse:.2f}")
 
     return output_video
 
 
 def _process_and_write_batch(crops, matrices, originals,
-                              lip_sync, enhancer, tracker,
+                              lip_sync, enhancer, sync_eval, tracker,
                               audio_path, fps, writer):
     """Process a batch of crops through lip-sync → enhance → blend → write."""
     # Lip-sync on crops
     synced_crops = lip_sync.sync_crops(crops, audio_path, fps)
+
+    # Evaluate sync confidence before enhancement
+    score = sync_eval.evaluate(synced_crops, audio_path, fps)
+
+    # Free memory before running CodeFormer
+    del crops
 
     # Enhance crops with CodeFormer
     enhanced_crops = enhancer.enhance_crops(synced_crops)
@@ -246,6 +274,8 @@ def _process_and_write_batch(crops, matrices, originals,
     for orig_frame, crop, M in zip(originals, enhanced_crops, matrices):
         final_frame = tracker.blend_crop(orig_frame, crop, M, feather=0.1)
         writer.write(final_frame)
+        
+    return score
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

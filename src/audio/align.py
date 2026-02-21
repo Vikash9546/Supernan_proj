@@ -141,14 +141,13 @@ class AudioAligner:
                 if synth_duration <= 0 or target_duration <= 0:
                     continue
 
-                # Time-stretch to match original timing
+                # Time-stretch is now handled natively via XTTS speed control in the TTS stage
                 ratio = synth_duration / target_duration
                 if abs(ratio - 1.0) > 0.02:
-                    audio = _time_stretch(audio, self.sample_rate, ratio)
                     logger.debug(
                         f"Segment [{seg.start:.2f}-{seg.end:.2f}]: "
-                        f"synth={synth_duration:.2f}s → target={target_duration:.2f}s "
-                        f"(ratio={ratio:.3f})"
+                        f"native synth={synth_duration:.2f}s → target={target_duration:.2f}s "
+                        f"(diff={abs(synth_duration - target_duration):.3f}s)"
                     )
 
                 # Trim or pad to exact target length

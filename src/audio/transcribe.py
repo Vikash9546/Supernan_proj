@@ -43,8 +43,9 @@ _SENTENCE_END = re.compile(r'[.!?]+\s*$')
 def _group_words_into_sentences(words: List[Word]) -> List[Segment]:
     """
     Groups word-level timestamps into sentence-level segments.
-    Splits at punctuation boundaries (. ! ?) so each segment
-    represents a semantically complete sentence.
+    Splits at punctuation boundaries (. ! ?), or long pauses (>1.0s),
+    or if the sentence exceeds a reasonable length (max 15 words) 
+    to prevent runaway sentences in languages that lack punctuation.
     """
     if not words:
         return []
@@ -53,12 +54,22 @@ def _group_words_into_sentences(words: List[Word]) -> List[Segment]:
     current_words = []
     current_text_parts = []
 
-    for word in words:
+    for i, word in enumerate(words):
         current_words.append(word)
         current_text_parts.append(word.text.strip())
 
-        # Check if this word ends a sentence
-        if _SENTENCE_END.search(word.text):
+        # Check for sentence split conditions:
+        is_ending_punct = _SENTENCE_END.search(word.text) is not None
+        
+        is_long_pause = False
+        if i + 1 < len(words):
+            next_word = words[i + 1]
+            if next_word.start - word.end > 1.0:
+                is_long_pause = True
+                
+        is_too_long = len(current_words) >= 15
+
+        if is_ending_punct or is_long_pause or is_too_long:
             text = " ".join(current_text_parts)
             sentences.append(Segment(
                 text=text,

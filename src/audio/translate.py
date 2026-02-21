@@ -6,7 +6,9 @@ Guarantees no incomplete sentences — never truncates.
 
 import re
 import logging
+import torch
 from typing import List, Optional
+from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +61,7 @@ class IndicTranslator:
     Uses IndicTrans2 as primary, with optional LLM rephrase for length control.
     """
 
-    def __init__(self, model_name: str = "ai4bharat/indictrans2-en-indic-1B",
+    def __init__(self, model_name: str = "facebook/nllb-200-distilled-600M",
                  device: str = "cuda"):
         self.device = device
         self.model_name = model_name
@@ -107,11 +109,29 @@ class IndicTranslator:
     def _translate_text(self, text: str) -> str:
         """Translate a single text string to Hindi."""
         inputs = self._tokenizer(text, return_tensors="pt", padding=True).to(self.device)
+        forced_bos_token_id = self._tokenizer.convert_tokens_to_ids("hin_Deva")
         with torch.no_grad():
             outputs = self._model.generate(
                 **inputs,
+                forced_bos_token_id=forced_bos_token_id,
                 max_length=int(len(text.split()) * 2.0 + 20),
                 num_beams=4,
+            )
+        return self._tokenizer.decode(outputs[0], skip_special_tokens=True)
+
+    def _translate_constrained(self, text: str, target_syllables: int) -> str:
+        """Deterministic translation with rigid length constraints."""
+        inputs = self._tokenizer(text, return_tensors="pt", padding=True).to(self.device)
+        forced_bos_token_id = self._tokenizer.convert_tokens_to_ids("hin_Deva")
+        # Enforce shorter generation by limiting tokens and adding length penalty
+        max_tokens = max(5, target_syllables * 2)
+        with torch.no_grad():
+            outputs = self._model.generate(
+                **inputs,
+                forced_bos_token_id=forced_bos_token_id,
+                max_new_tokens=max_tokens,
+                num_beams=4,
+                length_penalty=-1.0,  # Strongly discourage long sequences
             )
         return self._tokenizer.decode(outputs[0], skip_special_tokens=True)
 
@@ -183,12 +203,22 @@ class IndicTranslator:
 
             if hi_syllables > target_syllables:
                 logger.info(
-                    f"Translation too long ({hi_syllables} vs {target_syllables} max syllables), "
-                    f"attempting rephrase..."
+                    f"Translation too long ({hi_syllables} vs {target_syllables} max). "
+                    f"Attempting deterministic constrained generation..."
                 )
+                hindi_text_constrained = self._translate_constrained(text, target_syllables)
+                hi_syllables_constrained = count_syllables_hi(hindi_text_constrained)
+
+                if hi_syllables_constrained <= target_syllables or hi_syllables_constrained < hi_syllables:
+                    hindi_text = hindi_text_constrained
+                    hi_syllables = hi_syllables_constrained
+
+            # LLM Rephrase fallback
+            if hi_syllables > target_syllables and self._llm is not None:
+                logger.info("Deterministic fallback failed. Attempting LLM rephrase...")
                 hindi_text = self._rephrase_shorter(hindi_text, target_syllables)
                 hi_syllables = count_syllables_hi(hindi_text)
-                logger.info(f"After rephrase: {hi_syllables} syllables")
+                logger.info(f"After LLM rephrase: {hi_syllables} syllables")
 
             hindi_segs.append({
                 "start": start,

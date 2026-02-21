@@ -48,27 +48,32 @@ class FaceTracker:
     """
 
     def __init__(self, ema_alpha: float = 0.15, crop_size: int = 256,
-                 padding_ratio: float = 0.3):
+                 padding_ratio: float = 0.3, keyframe_interval: int = 30):
         """
         Args:
             ema_alpha: EMA smoothing factor (0=max smooth, 1=no smooth).
                        0.15 balances responsiveness with stability.
             crop_size: Output face crop size (square).
             padding_ratio: Extra padding around face as fraction of bbox size.
+            keyframe_interval: How often to run full detection vs optical flow tracking.
         """
         self.ema_alpha = ema_alpha
         self.crop_size = crop_size
         self.padding_ratio = padding_ratio
+        self.keyframe_interval = keyframe_interval
         self._ema_bbox: Optional[BBox] = None
         self._detector = None
         self._detection_backend = None
+        self._frame_count = 0
+        self._prev_gray = None
+        self._tracking_pts = None
 
     def load(self):
         """Load the face detection model."""
         # Try MediaPipe first (lightweight, accurate)
         try:
-            import mediapipe as mp
-            self._detector = mp.solutions.face_detection.FaceDetection(
+            from mediapipe.python.solutions import face_detection as mp_face_detection
+            self._detector = mp_face_detection.FaceDetection(
                 model_selection=1,  # Full-range model
                 min_detection_confidence=0.5,
             )
@@ -121,10 +126,45 @@ class FaceTracker:
     def track(self, frame: np.ndarray) -> BBox:
         """
         Detect face and apply EMA smoothing.
+        Uses optical flow tracking to reduce full detection overhead.
         Falls back to last known position or center crop if no face found.
         """
         h, w = frame.shape[:2]
-        raw_bbox = self.detect_raw(frame)
+        gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY) if frame.shape[2] == 3 else frame
+
+        # Check if keyframe or tracking lost
+        if self._ema_bbox is None or self._frame_count % self.keyframe_interval == 0:
+            raw_bbox = self.detect_raw(frame)
+            if raw_bbox is not None:
+                # Initialize tracking points from bbox center
+                self._tracking_pts = np.array([[[raw_bbox.cx, raw_bbox.cy]]], dtype=np.float32)
+            else:
+                self._tracking_pts = None
+        else:
+            raw_bbox = None
+            # Apply Optical flow
+            if self._prev_gray is not None and self._tracking_pts is not None:
+                new_pts, status, err = cv2.calcOpticalFlowPyrLK(
+                    self._prev_gray, gray, self._tracking_pts, None,
+                    winSize=(15, 15), maxLevel=2,
+                    criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.03)
+                )
+                if status[0][0] == 1:
+                    # Update raw_bbox based on optical flow delta
+                    dx = new_pts[0][0][0] - self._tracking_pts[0][0][0]
+                    dy = new_pts[0][0][1] - self._tracking_pts[0][0][1]
+                    raw_bbox = BBox(
+                        cx=self._ema_bbox.cx + dx,
+                        cy=self._ema_bbox.cy + dy,
+                        w=self._ema_bbox.w,
+                        h=self._ema_bbox.h
+                    )
+                    self._tracking_pts = new_pts
+                else:
+                    self._tracking_pts = None
+
+        self._prev_gray = gray
+        self._frame_count += 1
 
         if raw_bbox is None:
             if self._ema_bbox is not None:
@@ -242,3 +282,6 @@ class FaceTracker:
     def reset(self):
         """Reset EMA state between scenes or shots."""
         self._ema_bbox = None
+        self._frame_count = 0
+        self._prev_gray = None
+        self._tracking_pts = None
