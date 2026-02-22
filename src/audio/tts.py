@@ -110,11 +110,17 @@ class XTTSGenerator:
                             )
                         if os.path.exists(temp_chunk):
                             audio_data, sr = sf.read(temp_chunk)
+                            # Apply tiny fade to prevent clicks at chunk boundaries
+                            fade_len = int(sr * 0.005)  # 5ms
+                            if len(audio_data) > 2 * fade_len:
+                                fade_in = np.linspace(0, 1, fade_len)
+                                fade_out = np.linspace(1, 0, fade_len)
+                                audio_data[:fade_len] *= fade_in
+                                audio_data[-fade_len:] *= fade_out
                             all_audio.append(audio_data)
                             os.remove(temp_chunk)
                     
                     if all_audio:
-                        import numpy as np
                         combined = np.concatenate(all_audio)
                         sf.write(out_path, combined, sr)
                 
